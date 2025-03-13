@@ -5,3 +5,7 @@ Based on [home assistant fitbit integration](https://github.com/home-assistant/c
 ## Configuration
 
 Follow [home assistant's official fitbit integration documentation](https://www.home-assistant.io/integrations/fitbit/).
+
+## Polling frequency
+
+This integration reduces the number of sensors pulled, and in exchange increases the polling frequency to every 5 minutes.
