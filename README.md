@@ -9,3 +9,4 @@ Follow [home assistant's official fitbit integration documentation](https://www.
 ## Polling frequency
 
 This integration reduces the number of sensors pulled, and in exchange increases the polling frequency to every 5 minutes.
+Only sensor that is currently being pulled is battery (and states such as "battery charging / discharging").

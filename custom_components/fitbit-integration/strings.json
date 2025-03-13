@@ -39,6 +39,12 @@
       "battery_level": {
         "name": "Battery level"
       },
+      "battery_charge_rate": {
+        "name": "Battery charge rate"
+      },
+      "battery_charge_status": {
+        "name": "Battery charge status"
+      },
       "activity_calories": {
         "name": "Activity calories"
       },
