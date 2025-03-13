@@ -27,6 +27,7 @@ from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.icon import icon_for_battery_level
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from .api import FitbitApi
 from .const import ATTRIBUTION, BATTERY_LEVELS, DOMAIN, FitbitScope, FitbitUnitSystem
@@ -41,6 +42,8 @@ _CONFIGURING: dict[str, str] = {}
 SCAN_INTERVAL: Final = datetime.timedelta(minutes=30)
 
 FITBIT_TRACKER_SUBSTRING = "/tracker/"
+
+TRACK_SLEEP_START: Final = False
 
 
 def _default_value_fn(result: dict[str, Any]) -> str:
@@ -546,12 +549,15 @@ async def async_setup_entry(
         """Determine if an entity is allowed to be created."""
         return fitbit_config.is_allowed_resource(description.scope, description.key)
 
-    resource_list = [
-        *FITBIT_RESOURCES_LIST,
-        SLEEP_START_TIME_12HR
-        if fitbit_config.clock_format == "12H"
-        else SLEEP_START_TIME,
-    ]
+    resource_list = [*FITBIT_RESOURCES_LIST]
+
+    if TRACK_SLEEP_START:
+        # Add the correct sleep start time to the resource_list
+        resource_list.append(
+            SLEEP_START_TIME_12HR
+            if fitbit_config.clock_format == "12H"
+            else SLEEP_START_TIME
+        )
 
     entities = [
         FitbitSensor(
@@ -570,25 +576,39 @@ async def async_setup_entry(
 
     if data.device_coordinator and is_allowed_resource(FITBIT_RESOURCE_BATTERY):
         battery_entities: list[SensorEntity] = []
-        # battery_entities.extend(
-        #     FitbitBatterySensor(
-        #         data.device_coordinator,
-        #         user_profile.encoded_id,
-        #         FITBIT_RESOURCE_BATTERY,
-        #         device=device,
-        #         enable_default_override=is_explicit_enable(FITBIT_RESOURCE_BATTERY),
-        #     )
-        #     for device in data.device_coordinator.data.values()
-        # )
-        battery_entities.extend(
-            FitbitBatteryLevelSensor(
+        for device in data.device_coordinator.data.values():
+            battery_sensor = FitbitBatterySensor(
                 data.device_coordinator,
                 user_profile.encoded_id,
-                FITBIT_RESOURCE_BATTERY_LEVEL,
+                FITBIT_RESOURCE_BATTERY,
+                device=device,
+                enable_default_override=is_explicit_enable(FITBIT_RESOURCE_BATTERY),
+            )
+            battery_rate_sensor = FitbitBatteryRateSensor(
+                hass,
+                user_profile.encoded_id,
+                battery_sensor.entity_description.key,
                 device=device,
             )
-            for device in data.device_coordinator.data.values()
-        )
+            battery_entities.extend([
+                battery_sensor,
+                battery_rate_sensor,
+                FitbitBatteryStatusSensor(
+                    battery_rate_sensor,
+                    FITBIT_RESOURCE_BATTERY.key,
+                    user_profile.encoded_id,
+                    device=device,
+                ),
+            ])
+            # battery_entities.extend(
+            #     FitbitBatteryLevelSensor(
+            #         data.device_coordinator,
+            #         user_profile.encoded_id,
+            #         FITBIT_RESOURCE_BATTERY_LEVEL,
+            #         device=device,
+            #     )
+            #     for device in data.device_coordinator.data.values()
+            # )
         async_add_entities(battery_entities)
 
 
@@ -740,3 +760,103 @@ class FitbitBatteryLevelSensor(
         self.device = self.coordinator.data[self.device.id]
         self._attr_native_value = self.device.battery_level
         self.async_write_ha_state()
+
+
+class FitbitBatteryRateSensor(SensorEntity):
+    """Sensor that calculates the battery charge rate (change in percentage per minute)."""
+
+    def __init__(self,
+                hass,
+                user_profile_id: str,
+                _battery_entity_id: str,
+                device: FitbitDevice):
+        """Initialize the sensor."""
+        self.hass = hass
+        self._state = None
+        self._last_value = None
+        self._last_timestamp = None
+        self._user_profile_id = user_profile_id
+        self._device = device
+        self._attr_unique_id = f"{self._user_profile_id}_battery_charge_rate_{self._device.id}"
+        self._battery_entity_id = _battery_entity_id
+
+    @property
+    def name(self):
+        return "Battery Change"
+
+    @property
+    def state(self):
+        return self._state
+
+    @property
+    def unit_of_measurement(self):
+        return "%/min"
+
+    async def async_update(self):
+        """Update the sensor state by calculating the rate of change."""
+        battery_state = self.hass.states.get(self._battery_entity_id)
+        if battery_state is None:
+            return
+
+        try:
+            current_value = float(battery_state.state)
+        except ValueError:
+            return
+
+        now = dt_util.utcnow()
+        if self._last_value is not None and self._last_timestamp is not None:
+            time_diff = (now - self._last_timestamp).total_seconds()
+            if time_diff > 0:
+                # Calculate the rate in % per minute
+                rate = (current_value - self._last_value) / time_diff * 60
+                self._state = round(rate, 2)
+        self._last_value = current_value
+        self._last_timestamp = now
+
+
+class FitbitBatteryStatusSensor(SensorEntity):
+    """Sensor that interprets the battery rate as a trend (charging/discharging/full)."""
+
+    def __init__(self,
+                 battery_rate_sensor: FitbitBatteryRateSensor,
+                 battery_entity_id: SensorEntity,
+                 user_profile_id: str,
+                 device: FitbitDevice):
+        self._battery_rate_sensor = battery_rate_sensor
+        self._battery_entity_id = battery_entity_id
+        self._device = device
+        self._user_profile_id = user_profile_id
+        self._attr_unique_id = f"{user_profile_id}_battery_status_{device.id}"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, f"{user_profile_id}_{device.id}")},
+            name=device.device_version,
+            model=device.device_version,
+        )
+
+    @property
+    def name(self):
+        return "Battery Status"
+
+    @property
+    def state(self):
+        rate = self._battery_rate_sensor.state
+        if rate is None:
+            return "unknown"
+        if rate > 0:
+            return "charging"
+        elif rate == 0 and self._battery_entity_id == 100:
+            return "full"
+        else:
+            return "discharging"
+
+    @property
+    def icon(self):
+        rate = self._battery_rate_sensor.state
+        if rate is None:
+            return "mdi:battery-alert"
+        if rate > 0:
+            return "mdi:battery-charging-medium"
+        elif rate == 0 and self._battery_entity_id == 100:
+            return "mdi:battery-charging-high"
+        else:
+            return "mdi:battery-arrow-down"
