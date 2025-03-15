@@ -594,6 +594,12 @@ async def async_setup_entry(
     if data.device_coordinator and is_allowed_resource(FITBIT_RESOURCE_BATTERY):
         battery_entities: list[SensorEntity] = []
         for device in data.device_coordinator.data.values():
+            battery_rate_sensor = FitbitBatteryRateSensor(
+                data.device_coordinator,
+                user_profile.encoded_id,
+                FITBIT_RESOURCE_BATTERY_CHARGE_RATE,
+                device=device,
+            )
             battery_entities.extend([
                 # FitbitBatterySensor(
                 #     data.device_coordinator,
@@ -608,18 +614,15 @@ async def async_setup_entry(
                     FITBIT_RESOURCE_BATTERY_LEVEL,
                     device=device,
                 ),
-                FitbitBatteryRateSensor(
+                battery_rate_sensor,
+                FitbitBatteryStatusSensor(
+                    hass,
                     data.device_coordinator,
                     user_profile.encoded_id,
-                    FITBIT_RESOURCE_BATTERY_CHARGE_RATE,
+                    FITBIT_RESOURCE_BATTERY_CHARGE_STATUS,
+                    battery_rate_sensor,
                     device=device,
                 ),
-                # FitbitBatteryStatusSensor(
-                #     FITBIT_RESOURCE_BATTERY_CHARGE_RATE.key,
-                #     FITBIT_RESOURCE_BATTERY.key,
-                #     user_profile.encoded_id,
-                #     device=device,
-                # ),
             ])
 
         async_add_entities(battery_entities)
@@ -822,16 +825,13 @@ class FitbitBatteryRateSensor(CoordinatorEntity[FitbitDeviceCoordinator], Sensor
     
     @property
     def icon(self):
-        rate = self._state
-        if rate is None:
+        state = self._state
+        if state is None:
             return "mdi:battery-unknown"
-        if rate > 0:
+        elif state > 0:
             return "mdi:battery-charging-medium"
-        elif rate == 0:
-            if self._last_battery_value == 100:
-                return "mdi:battery-charging-high"
-            else:
-                return "mdi:battery"
+        elif state == 0 and self._last_battery_value == 100:
+            return "mdi:battery-charging-high"
         else:
             return "mdi:battery-arrow-down"
 
@@ -863,56 +863,85 @@ class FitbitBatteryRateSensor(CoordinatorEntity[FitbitDeviceCoordinator], Sensor
                 # Calculate the rate in % per minute
                 rate = (current_value - self._last_battery_value) / time_diff * 60
                 rounded_rate = round(rate, 2)
-            if rounded_rate > 0:
+
+            if rounded_rate != 0 or current_value == 100:
                 self._state = rounded_rate
                 self._last_battery_value = current_value
                 self._last_timestamp = now
                 self._attr_native_value = self._state
                 self.async_write_ha_state()
+        else:
+            self._last_battery_value = current_value
+            self._last_timestamp = now
+            self.async_write_ha_state()
 
-# class FitbitBatteryStatusSensor(SensorEntity):
-#     """Sensor that interprets the battery rate as a trend (charging/discharging/full)."""
+class FitbitBatteryStatusSensor(CoordinatorEntity[FitbitDeviceCoordinator], SensorEntity):
+    """Sensor that interprets the battery rate as a trend (charging/discharging/full)."""
 
-#     def __init__(self,
-#                  battery_rate_sensor: FitbitBatteryRateSensor,
-#                  battery_entity_id: SensorEntity,
-#                  user_profile_id: str,
-#                  device: FitbitDevice):
-#         self._battery_rate_sensor = battery_rate_sensor
-#         self._battery_entity_id = battery_entity_id
-#         self._device = device
-#         self._user_profile_id = user_profile_id
-#         self._attr_unique_id = f"{user_profile_id}_battery_status_{device.id}"
-#         self._attr_device_info = DeviceInfo(
-#             identifiers={(DOMAIN, f"{user_profile_id}_{device.id}")},
-#             name=device.device_version,
-#             model=device.device_version,
-#         )
+    def __init__(self,
+                hass: HomeAssistant,
+                coordinator: FitbitDeviceCoordinator,
+                user_profile_id: str,
+                description: FitbitSensorEntityDescription,
+                battery_rate_sensor: FitbitBatteryRateSensor,
+                device: FitbitDevice,):
+        """Initialize the Fitbit sensor."""
+        super().__init__(coordinator)
+        self.hass = hass
+        self._state = None
+        self._battery_rate_sensor = battery_rate_sensor
+        self.entity_description = description
+        self.device = device
+        self._attr_unique_id = f"{user_profile_id}_{description.key}_{device.id}"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, f"{user_profile_id}_{device.id}")},
+            name=device.device_version,
+            model=device.device_version,
+        )
 
-#     @property
-#     def name(self):
-#         return "Battery Status"
+    @property
+    def name(self):
+        return "Battery Charge Status"
 
-#     @property
-#     def state(self):
-#         rate = self._battery_rate_sensor.state
-#         if rate is None:
-#             return "unknown"
-#         if rate > 0:
-#             return "charging"
-#         elif rate == 0 and self._battery_entity_id == 100:
-#             return "full"
-#         else:
-#             return "discharging"
+    @property
+    def unique_id(self):
+        return self._attr_unique_id
+    
+    @property
+    def state(self):
+        return self._state
 
-#     @property
-#     def icon(self):
-#         rate = self._battery_rate_sensor.state
-#         if rate is None:
-#             return "mdi:battery-alert"
-#         if rate > 0:
-#             return "mdi:battery-charging-medium"
-#         elif rate == 0 and self._battery_entity_id == 100:
-#             return "mdi:battery-charging-high"
-#         else:
-#             return "mdi:battery-arrow-down"
+    @property
+    def icon(self):
+        state = self._state
+        if state is None:
+            return "mdi:battery-unknown"
+        elif state == "charging":
+            return "mdi:battery-charging-medium"
+        elif state == "full":
+            return "mdi:battery-charging-high"
+        else:
+            return "mdi:battery-arrow-down"
+    
+    async def async_added_to_hass(self) -> None:
+        """When entity is added to hass update state from existing coordinator data."""
+        await super().async_added_to_hass()
+        self._handle_coordinator_update()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+
+        self.device = self.coordinator.data[self.device.id]
+        rate = self._battery_rate_sensor.state
+        
+        if rate is None:
+            self._state = None
+        elif rate > 0:
+            self._state = "charging"
+        elif rate == 0 and self.device.battery_level == 100:
+            self._state = "full"
+        else:
+            self._state = "discharging"
+
+        self.async_write_ha_state()

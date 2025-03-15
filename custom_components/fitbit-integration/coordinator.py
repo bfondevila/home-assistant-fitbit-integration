@@ -17,7 +17,7 @@ from .model import FitbitDevice
 
 _LOGGER = logging.getLogger(__name__)
 
-UPDATE_INTERVAL: Final = datetime.timedelta(minutes=5)
+UPDATE_INTERVAL: Final = datetime.timedelta(minutes=2)
 TIMEOUT = 10
 
 type FitbitConfigEntry = ConfigEntry[FitbitData]
