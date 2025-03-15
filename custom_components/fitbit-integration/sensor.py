@@ -538,6 +538,15 @@ FITBIT_RESOURCE_BATTERY_CHARGE_STATUS = FitbitSensorEntityDescription(
     entity_category=EntityCategory.DIAGNOSTIC,
     has_entity_name=True,
 )
+FITBIT_RESOURCE_BATTERY_REMAINING_CHARGE_TIME = FitbitSensorEntityDescription(
+    key="devices/battery_remaining_charge_time",
+    translation_key="battery_remaining_charge_time",
+    native_unit_of_measurement=UnitOfTime.MINUTES,
+    icon="mdi:timer",
+    scope=FitbitScope.DEVICE,
+    entity_category=EntityCategory.DIAGNOSTIC,
+    has_entity_name=True,
+)
 
 
 async def async_setup_entry(
@@ -594,6 +603,12 @@ async def async_setup_entry(
     if data.device_coordinator and is_allowed_resource(FITBIT_RESOURCE_BATTERY):
         battery_entities: list[SensorEntity] = []
         for device in data.device_coordinator.data.values():
+            battery_level_sensor = FitbitBatteryLevelSensor(
+                data.device_coordinator,
+                user_profile.encoded_id,
+                FITBIT_RESOURCE_BATTERY_LEVEL,
+                device=device,
+            )
             battery_rate_sensor = FitbitBatteryRateSensor(
                 data.device_coordinator,
                 user_profile.encoded_id,
@@ -608,18 +623,20 @@ async def async_setup_entry(
                 #     device=device,
                 #     enable_default_override=is_explicit_enable(FITBIT_RESOURCE_BATTERY),
                 # ),
-                FitbitBatteryLevelSensor(
-                    data.device_coordinator,
-                    user_profile.encoded_id,
-                    FITBIT_RESOURCE_BATTERY_LEVEL,
-                    device=device,
-                ),
+                battery_level_sensor,
                 battery_rate_sensor,
                 FitbitBatteryStatusSensor(
-                    hass,
                     data.device_coordinator,
                     user_profile.encoded_id,
                     FITBIT_RESOURCE_BATTERY_CHARGE_STATUS,
+                    battery_rate_sensor,
+                    device=device,
+                ),
+                FitbitBatteryTimeRemainingSensor(
+                    data.device_coordinator,
+                    user_profile.encoded_id,
+                    FITBIT_RESOURCE_BATTERY_REMAINING_CHARGE_TIME,
+                    battery_rate_sensor,
                     battery_rate_sensor,
                     device=device,
                 ),
@@ -879,7 +896,6 @@ class FitbitBatteryStatusSensor(CoordinatorEntity[FitbitDeviceCoordinator], Sens
     """Sensor that interprets the battery rate as a trend (charging/discharging/full)."""
 
     def __init__(self,
-                hass: HomeAssistant,
                 coordinator: FitbitDeviceCoordinator,
                 user_profile_id: str,
                 description: FitbitSensorEntityDescription,
@@ -887,7 +903,6 @@ class FitbitBatteryStatusSensor(CoordinatorEntity[FitbitDeviceCoordinator], Sens
                 device: FitbitDevice,):
         """Initialize the Fitbit sensor."""
         super().__init__(coordinator)
-        self.hass = hass
         self._state = None
         self._battery_rate_sensor = battery_rate_sensor
         self.entity_description = description
@@ -944,4 +959,70 @@ class FitbitBatteryStatusSensor(CoordinatorEntity[FitbitDeviceCoordinator], Sens
         else:
             self._state = "discharging"
 
+        self.async_write_ha_state()
+
+class FitbitBatteryTimeRemainingSensor(CoordinatorEntity[FitbitDeviceCoordinator], SensorEntity):
+    """Sensor that calculates remaining charging/discharging time based on the charge/discharge rate"""
+
+    _attr_remaining_charge_type = None
+
+    def __init__(self,
+                coordinator: FitbitDeviceCoordinator,
+                user_profile_id: str,
+                description: FitbitSensorEntityDescription,
+                battery_rate_sensor: FitbitBatteryRateSensor,
+                battery_level_sensor: FitbitBatteryLevelSensor,
+                device: FitbitDevice,):
+        """Initialize the Fitbit sensor."""
+        super().__init__(coordinator)
+        self._state = None
+        self._battery_rate_sensor = battery_rate_sensor
+        self._battery_level_sensor = battery_level_sensor
+        self.entity_description = description
+        self.device = device
+        self._attr_unique_id = f"{user_profile_id}_{description.key}_{device.id}"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, f"{user_profile_id}_{device.id}")},
+            name=device.device_version,
+            model=device.device_version,
+        )
+
+    @property
+    def name(self):
+        return "Battery Remaining Charge Time"
+
+    @property
+    def unique_id(self):
+        return self._attr_unique_id
+    
+    @property
+    def state(self):
+        return self._state
+    
+    async def async_added_to_hass(self) -> None:
+        """When entity is added to hass update state from existing coordinator data."""
+        await super().async_added_to_hass()
+        self._handle_coordinator_update()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+
+        rate = self._battery_rate_sensor.state
+        level = self._battery_level_sensor.state
+        if rate is None or level is None:
+            return None
+
+        try:
+            level = float(rate)
+        except ValueError:
+            _LOGGER.debug("Value error parsing battery charge rate %s", rate)
+            return None
+
+        minutes_remaining = level / abs(rate)
+        self._state = round(minutes_remaining, 1)
+        if rate > 0:
+            self._attr_remaining_charge_type = "charging"
+        else:
+            self._attr_remaining_charge_type = "discharging"
         self.async_write_ha_state()
