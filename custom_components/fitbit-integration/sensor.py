@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import datetime
 import logging
-from typing import Any, Final, cast
+from typing import Any, Final, cast, Literal
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -541,7 +541,16 @@ FITBIT_RESOURCE_BATTERY_CHARGE_STATUS = FitbitSensorEntityDescription(
 FITBIT_RESOURCE_BATTERY_REMAINING_CHARGE_TIME = FitbitSensorEntityDescription(
     key="devices/battery_remaining_charge_time",
     translation_key="battery_remaining_charge_time",
-    native_unit_of_measurement=UnitOfTime.MINUTES,
+    native_unit_of_measurement=UnitOfTime.HOURS,
+    icon="mdi:timer",
+    scope=FitbitScope.DEVICE,
+    entity_category=EntityCategory.DIAGNOSTIC,
+    has_entity_name=True,
+)
+FITBIT_RESOURCE_BATTERY_REMAINING_DISCHARGE_TIME = FitbitSensorEntityDescription(
+    key="devices/battery_remaining_discharge_time",
+    translation_key="battery_remaining_discharge_time",
+    native_unit_of_measurement=UnitOfTime.HOURS,
     icon="mdi:timer",
     scope=FitbitScope.DEVICE,
     entity_category=EntityCategory.DIAGNOSTIC,
@@ -636,8 +645,18 @@ async def async_setup_entry(
                     data.device_coordinator,
                     user_profile.encoded_id,
                     FITBIT_RESOURCE_BATTERY_REMAINING_CHARGE_TIME,
+                    "charging",
                     battery_rate_sensor,
+                    battery_level_sensor,
+                    device=device,
+                ),
+                FitbitBatteryTimeRemainingSensor(
+                    data.device_coordinator,
+                    user_profile.encoded_id,
+                    FITBIT_RESOURCE_BATTERY_REMAINING_DISCHARGE_TIME,
+                    "discharging",
                     battery_rate_sensor,
+                    battery_level_sensor,
                     device=device,
                 ),
             ])
@@ -964,18 +983,18 @@ class FitbitBatteryStatusSensor(CoordinatorEntity[FitbitDeviceCoordinator], Sens
 class FitbitBatteryTimeRemainingSensor(CoordinatorEntity[FitbitDeviceCoordinator], SensorEntity):
     """Sensor that calculates remaining charging/discharging time based on the charge/discharge rate"""
 
-    _attr_remaining_charge_type = None
-
     def __init__(self,
                 coordinator: FitbitDeviceCoordinator,
                 user_profile_id: str,
                 description: FitbitSensorEntityDescription,
+                type: Literal["charging", "discharging"],
                 battery_rate_sensor: FitbitBatteryRateSensor,
                 battery_level_sensor: FitbitBatteryLevelSensor,
                 device: FitbitDevice,):
         """Initialize the Fitbit sensor."""
         super().__init__(coordinator)
         self._state = None
+        self._type = type
         self._battery_rate_sensor = battery_rate_sensor
         self._battery_level_sensor = battery_level_sensor
         self.entity_description = description
@@ -989,7 +1008,10 @@ class FitbitBatteryTimeRemainingSensor(CoordinatorEntity[FitbitDeviceCoordinator
 
     @property
     def name(self):
-        return "Battery Remaining Charge Time"
+        if self._type == "charging":
+            return "Time to fully charged"
+        else:
+            return "Battery life (time)"
 
     @property
     def unique_id(self):
@@ -1013,16 +1035,13 @@ class FitbitBatteryTimeRemainingSensor(CoordinatorEntity[FitbitDeviceCoordinator
         if rate is None or level is None:
             return None
 
-        try:
-            level = float(rate)
-        except ValueError:
-            _LOGGER.debug("Value error parsing battery charge rate %s", rate)
-            return None
-
-        minutes_remaining = level / abs(rate)
-        self._state = round(minutes_remaining, 1)
-        if rate > 0:
-            self._attr_remaining_charge_type = "charging"
+        if self._type == "charging" and rate > 0:
+            minutes_remaining = (100 - level) / rate
+            self._state = round(minutes_remaining / 60, 1)
+            self.async_write_ha_state()
+        elif self._type == "discharging" and rate < 0:
+            minutes_remaining = level / abs(rate)
+            self._state = round(minutes_remaining / 60, 1)
         else:
-            self._attr_remaining_charge_type = "discharging"
+            self._state = None
         self.async_write_ha_state()
